@@ -1,0 +1,91 @@
+#!/usr/bin/env python
+
+"""
+Quick script to beemind entering at least some meals into MyFitnessPal for the day.
+
+Setup instructions:
+
+  - run scripts/bootstrap
+  - set MyFitnessPal username with environment variable: `export MFP_USERNAME=...`
+  - set MyFitnessPal password with `myfitnesspal store-password $MFP_USERNAME`
+  - set Beeminder username with environment variable: `export BM_USERNAME=...`
+  - set Beeminder auth token with `keychain set beeminder $BM_USERNAME`
+  - set Beeminder goal name with environment variable: `export BM_GOAL=myfitnesspal
+
+PROFIT!
+"""
+
+import datetime
+import json
+import logging
+import sys
+import os
+
+import keyring
+import myfitnesspal
+import requests
+
+# Constants
+BEEMINDER_URL = "https://www.beeminder.com/api/v1"
+GET_URL       = BEEMINDER_URL + "/users/{bm_username}/goals/{bm_goal_name}.json"
+POST_URL      = BEEMINDER_URL + "/users/{bm_username}/goals/{bm_goal_name}/datapoints.json"
+MFP_KEYRING = 'python-myfitnesspal://myfitnesspal-password'
+
+
+logging.basicConfig(stream=sys.stderr, level=logging.DEBUG)
+
+mfp_username = os.environ.get('MFP_USERNAME')
+bm_username = os.environ.get('BM_USERNAME')
+bm_goal_name = os.environ.get('BM_GOAL')
+
+
+now = datetime.datetime.now()
+
+### Validation
+
+# validate credentials
+if None == mfp_username:
+    print("Missing MyFitnessPal username\nSet with environment variable MFP_USERNAME")
+    sys.exit()
+mfp_password = keyring.get_password(MFP_KEYRING, mfp_username)
+if None == mfp_password:
+    print("Missing MyFitnessPal password\nSet with `myfitnesspal store-password $MFP_USERNAME`")
+    sys.exit()
+if None == bm_username:
+    print("Missing Beeminder username\nSet with environment variable BM_USERNAME")
+    sys.exit()
+bm_auth_token = keyring.get_password("beeminder", bm_username)
+if None == bm_auth_token:
+    print("Missing Beeminder auth token\nSet with `keychain set beeminder $BM_USERNAME`")
+    sys.exit()
+if None == bm_goal_name:
+    print("Missing Beeminder goal name\nSet with environment variable BM_GOAL")
+    sys.exit()
+
+# Ensure goal exists
+resp = requests.get(GET_URL.format(**locals()), data={"auth_token": bm_auth_token})
+if not resp.ok:
+    print("Beeminder goal seems missing: {}".format(resp))
+    sys.exit()
+
+
+### Main Execution
+
+# Set up a myfitnesspal API client
+client = myfitnesspal.Client(mfp_username)
+
+# Look up myfitnesspal meals entered today
+day = client.get_date(now.year, now.month, now.day)
+entered = max(len(meal.entries) for meal in day.meals)
+
+# Look up beeminder data points today
+result = requests.get(GET_URL.format(**locals()), data={"auth_token": bm_auth_token}).json()
+updated_at = datetime.datetime.fromtimestamp(result["updated_at"])
+
+# Ensure to beeminder has a datapoint if meals have been entered
+today8am = now.replace(hour=8, minute=0, second=0)
+if entered and updated_at < today8am:
+    requests.post(POST_URL.format(**locals()), data={
+        "auth_token": bm_auth_token,
+        "value": 1,
+        "comment": "via MyFitnessPal scripting on {}".format(now.isoformat())})
